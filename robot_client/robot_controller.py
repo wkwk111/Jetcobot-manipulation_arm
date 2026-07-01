@@ -21,6 +21,9 @@ JOINT_LIMITS_DEG: tuple[tuple[float, float], ...] = (
     (-180.0, 180.0),  # J6
 )
 
+# 관절 이동 도착 허용오차 기본값. config에 JOINT_MOVE_TOL_DEG가 있으면 그 값을 사용.
+DEFAULT_JOINT_MOVE_TOL_DEG = 2.0
+
 
 def _angle_difference_deg(a: float, b: float) -> float:
     return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
@@ -150,6 +153,44 @@ class RobotController:
         print("[ROBOT] joint target wait timeout:", target)
         return False
 
+    def send_joint_angles_and_wait(
+        self,
+        target_angles: Iterable[float],
+        speed: int,
+        *,
+        timeout_sec: float | None = None,
+        tolerance_deg: float | None = None,
+        abort_event: Event | None = None,
+        async_send: bool = False,
+    ) -> bool:
+        """관절각으로 이동하고 도착까지 대기합니다. IK를 풀지 않습니다.
+
+        좌표(send_coords)와 달리 역기구학이 필요 없어, 고정 자세(홈/던지기
+        최종 위치)로 안정적으로 이동할 수 있습니다.
+        """
+        angles = self._validate_joint_angles(target_angles, "target_angles")
+
+        speed = int(speed)
+        if not 1 <= speed <= 100:
+            raise ValueError("joint move speed must be in 1..100")
+
+        timeout = config.MOVE_TIMEOUT_SEC if timeout_sec is None else float(timeout_sec)
+        tolerance = (
+            float(getattr(config, "JOINT_MOVE_TOL_DEG", DEFAULT_JOINT_MOVE_TOL_DEG))
+            if tolerance_deg is None
+            else float(tolerance_deg)
+        )
+
+        print("[ROBOT] send_angles:", angles, "speed:", speed, "async:", async_send)
+        self.mc.send_angles(angles, speed, _async=async_send)
+
+        return self.wait_until_joint_angles(
+            angles,
+            timeout_sec=timeout,
+            tolerance_deg=tolerance,
+            abort_event=abort_event,
+        )
+
     def wait_until_flange_pose(
         self,
         target_coords: Iterable[float],
@@ -198,14 +239,34 @@ class RobotController:
         self.mc.send_coords(target_coords, config.MOVE_SPEED, config.MOVE_MODE)
         return self.wait_until_flange_pose(target_coords)
 
+    def _has_valid_config_angles(self, attr: str) -> bool:
+        raw = getattr(config, attr, None)
+        try:
+            return raw is not None and len(list(raw)) == 6
+        except TypeError:
+            return False
+
+    def _move_home(self, abort_event: Event | None = None) -> bool:
+        """홈 복귀. HOME_ANGLES가 있으면 관절각으로(IK 불필요),
+        없으면 기존처럼 HOME_FLANGE_COORDS 좌표로 이동합니다."""
+        if self._has_valid_config_angles("HOME_ANGLES"):
+            speed = int(getattr(config, "HOME_MOVE_SPEED", config.MOVE_SPEED))
+            print("[ROBOT] home by joint angles:", config.HOME_ANGLES)
+            return self.send_joint_angles_and_wait(
+                config.HOME_ANGLES,
+                speed,
+                abort_event=abort_event,
+            )
+        return self.send_flange_coords_and_wait(config.HOME_FLANGE_COORDS)
+
     def move_home_and_open_gripper(self) -> bool:
         self.set_flange_mode()
         self.open_gripper()
-        return self.send_flange_coords_and_wait(config.HOME_FLANGE_COORDS)
+        return self._move_home()
 
     def move_home_keep_gripper_closed(self) -> bool:
         self.set_flange_mode()
-        return self.send_flange_coords_and_wait(config.HOME_FLANGE_COORDS)
+        return self._move_home()
 
     def stop_motion(self) -> None:
         print("[ROBOT] stop motion")
@@ -239,6 +300,14 @@ class RobotController:
             raise ValueError("throw final coords must contain six finite values")
         return coords
 
+    def _get_throw_final_angles(self) -> list[float] | None:
+        """THROW_FINAL_ANGLES가 설정돼 있으면 검증해 반환, 없으면 None.
+        None이면 최종 이동을 좌표(send_coords)로 수행합니다."""
+        raw = getattr(config, "THROW_FINAL_ANGLES", None)
+        if raw is None:
+            return None
+        return self._validate_joint_angles(raw, "THROW_FINAL_ANGLES")
+
     def _get_throw_final_speed(self) -> int:
         return int(
             getattr(
@@ -267,7 +336,8 @@ class RobotController:
         2) 종료 자세 이동을 _async=True으로 전송
         3) 지정 지연 후 그리퍼 열기 패킷을 _async=True으로 전송
         4) 종료 자세 도착 확인
-        5) 최종 Flange 좌표 이동을 _async=True으로 전송
+        5) 최종 위치 이동을 _async=True으로 전송
+           - THROW_FINAL_ANGLES가 있으면 관절각(IK 불필요), 없으면 Flange 좌표
         """
         released = False
 
@@ -280,9 +350,15 @@ class RobotController:
                 config.THROW_END_ANGLES,
                 "THROW_END_ANGLES",
             )
-            final_coords = self._get_throw_final_coords()
             final_speed = self._get_throw_final_speed()
             final_mode = self._get_throw_final_mode()
+
+            # 최종 위치: 각도 config가 있으면 각도로, 없으면 좌표로.
+            # 각도가 있으면 좌표는 필수가 아니므로 그때만 좌표를 검증합니다.
+            final_angles = self._get_throw_final_angles()
+            final_coords = (
+                None if final_angles is not None else self._get_throw_final_coords()
+            )
         except (AttributeError, TypeError, ValueError) as exc:
             return False, f"Throw configuration error: {exc}", released
 
@@ -292,7 +368,7 @@ class RobotController:
             return False, "THROW_SPEED must be in 1..100", released
         if not 1 <= final_speed <= 100:
             return False, "THROW_FINAL_MOVE_SPEED must be in 1..100", released
-        if final_mode not in (0, 1):
+        if final_angles is None and final_mode not in (0, 1):
             return False, "THROW_FINAL_MOVE_MODE must be 0 or 1", released
 
         if abort_event is not None and abort_event.is_set():
@@ -353,21 +429,37 @@ class RobotController:
         if abort_event is not None and abort_event.is_set():
             return False, "Throw cancelled before final move", released
 
-        # 5) 최종 좌표도 비동기 전송 후, worker에서만 도착 여부를 확인합니다.
-        self.set_flange_mode()
-        print("[THROW] move to final flange pose:", final_coords)
-        self.mc.send_coords(
-            final_coords,
-            final_speed,
-            final_mode,
-            _async=True,
-        )
+        # 5) 최종 위치도 비동기 전송 후, worker에서만 도착 여부를 확인합니다.
+        #    THROW_FINAL_ANGLES가 설정돼 있으면 관절각으로(IK 없이), 아니면 좌표로.
+        if final_angles is not None:
+            print("[THROW] move to final pose by joint angles:", final_angles)
+            self.mc.send_angles(
+                final_angles,
+                final_speed,
+                _async=True,
+            )
+            reached_final = self.wait_until_joint_angles(
+                final_angles,
+                float(config.THROW_FINAL_TIMEOUT_SEC),
+                float(config.THROW_ANGLE_TOLERANCE_DEG),
+                abort_event,
+            )
+        else:
+            self.set_flange_mode()
+            print("[THROW] move to final flange pose:", final_coords)
+            self.mc.send_coords(
+                final_coords,
+                final_speed,
+                final_mode,
+                _async=True,
+            )
+            reached_final = self.wait_until_flange_pose(
+                final_coords,
+                timeout_sec=float(config.THROW_FINAL_TIMEOUT_SEC),
+                abort_event=abort_event,
+            )
 
-        if not self.wait_until_flange_pose(
-            final_coords,
-            timeout_sec=float(config.THROW_FINAL_TIMEOUT_SEC),
-            abort_event=abort_event,
-        ):
+        if not reached_final:
             return False, "Throw final pose timeout/cancelled", released
 
         return True, "Throw sequence completed", released

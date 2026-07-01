@@ -1,5 +1,7 @@
 # Jetcobot-manipulation_arm
 
+## 캘리브레이션을 포함한 이후 모든 과정은 VNC를 이용해서 이미지 창을 클릭한 후 키보드로 조정합니다.
+
 ## 1. 노트북 준비
 
 `robot_client/`, `config/`이 포함된 이 폴더 전체를 노트북에 둡니다.
@@ -121,15 +123,124 @@ home_flange_coords는 from pymycobot.mycobot280 import MyCobot280의 coords = mc
 </p>
 
 
-## 5. pick & place 및 throw 기능
+## 5. throw 파라미터 설정
 
-`robot_client/`, `config/`이 포함된 이 폴더 전체를 노트북에 둡니다.
+throw를 위해서 throw 행동을 Jetcobot의 수동 조작 모드로 조정합니다.
+`throw_cal.py`를 실행합니다.
 
-### Ubuntu Terminal
-
-```mkdir client
-cd client
-python3 -m venv ~/venv/client
-source ~/venv/client/bin/activate
-pip install -r requirements.txt
+```cd client
+python3 throw_cal.py
 ```
+
+실행 결과물로는 `throw_motion_extracted.json`이 생성됩니다. 생성물 내의
+
+```"THROW_START_ANGLES": [
+    -5.09,
+    84.46,
+    4.3,
+    -39.99,
+    -28.47,
+    63.01
+  ],
+  "THROW_END_ANGLES": [
+    5.18,
+    -40.51,
+    5.18,
+    32.43,
+    -4.48,
+    62.92
+  ]
+```
+
+를 `client/robot_client/config.py` 내의 같은 항목에 붙여넣어 
+
+THROW_START_ANGLES (던지기 위해 팔을 당긴 상태)
+THROW_END_ANGLES (물건을 던져 팔을 편 상태)
+
+를 설정하고 
+
+THROW_SPEED(던지는 속도) = 100
+THROW_GRIPPER_OPEN_DELAY_SEC(던지기 위해 팔을 당긴 상태로 부터 그리퍼가 열릴 때까지의 시간) = 0.3
+
+을 조정하여 비거리와 던지기 위치를 목적에 맞게 조정합니다.
+
+## 6. Pick & Place
+
+Pick & Place를 수행하기 위해 `client/run_client.py`를 실행합니다.
+
+Jetcobot 카메라에 물체가 들어왔는지 확인하기 위해 반드시 VNC 환경에서 실행해주세요
+
+```cd client
+python3 run_client.py
+```
+
+<p align="center">
+  <img 
+    src="./images/run_client_screen.png" 
+    alt="Jetcobot VNC 터미널 run_client.py 실행 결과"
+    height="400"
+    width="700"
+  /><br>
+  <em>Jetcobot VNC 터미널 run_client.py 실행 결과</em>
+</p>
+
+Jetcobot 카메라 이미지 창을 누르고 g키를 누르면 물체의 위치로 로봇팔이 이동하여 pick을 달성합니다.
+
+<p align="center">
+  <img 
+    src="./images/grap.png" 
+    alt="run_client.py pick 결과"
+    height="400"
+    width="700"
+  /><br>
+  <em>run_client.py pick 결과</em>
+</p>
+
+<p align="center">
+  <img 
+    src="./images/grap_state.png" 
+    alt="Jetcobot grap 결과"
+    height="400"
+    width="700"
+  /><br>
+  <em>Jetcobot grap 결과</em>
+</p>
+
+pick을 달성한 상태로 추가적으로 w를 누르면 설정된 Home Pose로 돌아갑니다.
+
+<p align="center">
+  <img 
+    src="./images/home_state.png" 
+    alt="Jetcobot grap 결과"
+    height="400"
+    width="700"
+  /><br>
+  <em>Jetcobot home 결과</em>
+</p>
+
+place를 위해서 설정된 좌표로 mc_send_coord()를 통한 추가 구현이 필요합니다.
+
+pick을 달성한 상태로 추가적으로 t를 누르면 `client/throw_motion_extracted.json`를 통해 설정된 던지기를 수행합니다.
+
+## 주요 수정 파일
+
+- `client/config/client_config.ini`: Jetcobot 움직임 관련 주요 설정
+- `client/robot_client/config.py`: throw 동작 관련 주요 설정
+- `client/jecobot.ipynb` : pymycobot을 이용한 Jetcobot 조작 예시
+
+`client/jecobot.ipynb` 내 예시로 있는 mc.get_coords()를 사용하여 멈춰 있는 Jetcobot의 좌표 취득 가능
+`client/config/client_config.ini` 내 home_flange_coords를 mc.get_coords()를 이용하여 초기 위치 설정 가능
+
+`client/jecobot.ipynb` 내 예시로 있는 mc.get_angles()를 사용하여 멈춰 있는 Jetcobot의 각도 취득 가능
+`client/robot_client/config.py` 내 HOME_ANGLES, THROW_FINAL_ANGLES을 mc.get_angles()을 통해 설정 가능 (두 값은 안정성을 위해 같은 값으로 설정을 권장)
+
+`client/run_client.py`의 grap이 timeout이 나는 경우에는 `client/jecobot.ipynb` 내의 수동 조작 모드를 이용하여 직접 손으로 Jetcobot을 조작하여 안정적으로 해당 물체에 갈 수 있는지 확인하여 `client/config/client_config.ini`과 `client/robot_client/config.py` 내 파라미터를 수정해주세요.
+
+
+
+
+
+
+
+
+
